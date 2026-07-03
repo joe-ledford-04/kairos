@@ -1,12 +1,22 @@
-from dotenv import load_dotenv
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
+from statsmodels.tsa.stattools import adfuller
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-import pandas as pd
 
 load_dotenv()
+
+project_root = Path(__file__).resolve().parent.parent
+data_dir = project_root / "Data"
+
+data_dir.mkdir(exist_ok=True)
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
@@ -74,7 +84,4 @@ request_params = StockBarsRequest(
 )
 
 bars_df = client.get_stock_bars(request_params).df
-print(bars_df.head())
-
-
-
+bars_df.to_parquet(data_dir / "bars.parquet", index=True)
