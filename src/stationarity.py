@@ -30,17 +30,16 @@ for symbol, group in adf_df.groupby("symbol"):
 exxon_df = stock_data["XOM"].reset_index(drop=True)
 chevron_df = stock_data["CVX"].reset_index(drop=True)
 
-x = exxon_df["close"]
-y = chevron_df["close"]
+X = exxon_df["close"]
+Y = chevron_df["close"]
 
-x_with_constant = sm.add_constant(x)
+X_with_constant = sm.add_constant(X)
 
-model = sm.OLS(y, x_with_constant)
-results = model.fit()
 
-hedge_ratio = results.params["close"]
+model = sm.OLS(Y, X_with_constant).fit()
+hedge_ratio = model.params["close"]
 
-print(results.summary())
+print(model.summary())
 print(hedge_ratio)
 
 
