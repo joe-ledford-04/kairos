@@ -36,10 +36,12 @@ Y = chevron_df["close"]
 X_with_constant = sm.add_constant(X)
 
 
-model = sm.OLS(Y, X_with_constant).fit()
-hedge_ratio = model.params["close"]
+model = sm.OLS(Y, X_with_constant)
+results = model.fit()
+hedge_ratio = results.params["close"]
+resids = results.resid
 
-print(model.summary())
+print(results.summary())
 print(hedge_ratio)
 
 
