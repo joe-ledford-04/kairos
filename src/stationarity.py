@@ -219,7 +219,7 @@ def calc_zscore_signal(stock_data, valid_pairs):
         each approved trading pair.
     """
 
-    zscores = {}
+    pair_objects = {}
 
     for _, row in valid_pairs.iterrows():
         X_name = row["symbol_1"]
@@ -235,12 +235,87 @@ def calc_zscore_signal(stock_data, valid_pairs):
         rolling_std = spread.rolling(window=60).std()
 
         zscore = (spread - rolling_mean) / rolling_std
-        zscores[f"{X_name}:{Y_name}"] = {
+        pair_objects[f"{X_name}:{Y_name}"] = {
+            X_name: X,
+            Y_name: Y,
+            "hedge_ratio": beta,
             "spread": spread,
             "zscore": zscore,
         }
 
-    return zscores
+    return pair_objects
+
+
+def backtest(pair_objects):
+    """
+    Simulate a simple mean-reversion strategy on each approved pair.
+
+    For each pair, walks the z-score series day by day and maintains a
+    single-unit position (long spread, short spread, or flat) based on
+    entry/exit z-score thresholds. Position decisions at each step use
+    only the prior day's z-score to avoid look-ahead bias. Daily P&L is
+    computed as the beta-adjusted spread return, scaled by the position
+    held during that day.
+
+    Parameters
+    ----------
+    pair_objects : dict[str, dict]
+        Output of `calc_zscore_signal`. Each entry must contain the two
+        price series, the hedge ratio, and the z-score series for one
+        approved pair.
+
+    Returns
+    -------
+    dict[str, list[float]]
+        Daily P&L series for each pair, keyed by pair name.
+    """
+    pnl_results = {}
+
+    for pair_name, pair_data in pair_objects.items():
+        x_name, y_name = pair_name.split(":")
+
+        trade_count = 0
+        current_pos = 0
+        pnl_series = []
+
+        X = pair_data[x_name]
+        Y = pair_data[y_name]
+        zscores = pair_data["zscore"]
+        beta = pair_data["hedge_ratio"]
+
+        for i in range(1, len(zscores)):
+            z_prev = zscores.iloc[i - 1]
+
+            X_ret = X.iloc[i] - X.iloc[i - 1]
+            Y_ret = Y.iloc[i] - Y.iloc[i - 1]
+
+            spread_ret = Y_ret - beta * X_ret
+
+            if current_pos == 0:
+                if z_prev > 2:
+                    current_pos = -1
+                    trade_count += 1
+                elif z_prev < -2:
+                    current_pos = 1
+                    trade_count += 1
+            elif current_pos == -1:
+                if z_prev <= 0.5:
+                    current_pos = 0
+            elif current_pos == 1:
+                if z_prev >= -0.5:
+                    current_pos = 0
+
+            pnl = current_pos * spread_ret
+            pnl_series.append(pnl)
+
+        pnl_results[pair_name] = {
+            "sim_days": len(zscores),
+            "trading_days": trade_count,
+            "total_pnl": sum(pnl_series),
+            "pnl_series": pnl_series,
+        }
+
+    return pnl_results
 
 
 def main():
@@ -260,8 +335,19 @@ def main():
     logger.info("\n%s", approved_pairs)
 
     logger.info("Calculating Z-score Signal for valid pairs.")
-    zscores = calc_zscore_signal(stock_data, approved_pairs)
-    logger.info("\n%s", zscores)
+    pair_objects = calc_zscore_signal(stock_data, approved_pairs)
+    logger.info("\n%s", pair_objects)
+
+    logger.info("Backtesting")
+    pnl_results = backtest(pair_objects)
+    for pair_name, result in pnl_results.items():
+        logger.info(
+            "%s | Sim Days: %d | Trades: %d | Total PnL: %.2f",
+            pair_name,
+            result["sim_days"],
+            result["trading_days"],
+            result["total_pnl"],
+        )
 
 
 if __name__ == "__main__":
