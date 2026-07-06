@@ -1,48 +1,109 @@
 from pathlib import Path
+import logging
+from logging_config import setup_logging
+from itertools import combinations
 
-import pandas as pd  
-from statsmodels.tsa.stattools import adfuller
+import pandas as pd
 import statsmodels.api as sm
+import statsmodels.tsa.stattools as ts
 
-project_root = Path(__file__).resolve().parent.parent
-data_dir = project_root / "Data"
+logger = logging.getLogger(__name__)
 
-bars_df = pd.read_parquet(data_dir / "bars.parquet")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "Data"
 
-# ------ Augmented Dicky-Fuller Test -------
-adf_df = bars_df.reset_index()[["symbol", "timestamp", "close"]]
+def load_data():
+    """
+    Load price data and reshape into a wide dataframe:
+        timestamp | AAPL | CVX | XOM | ...
+    """
 
-for symbol, group in adf_df.groupby("symbol"):
-    closes = group["close"]
+    df = pd.read_parquet(DATA_DIR / "bars.parquet").reset_index()
 
-    stat, pvalue, *_ = adfuller(closes)
+    stock_data = (
+        df.pivot(
+            index="timestamp",
+            columns="symbol",
+            values="close",
+        )
+        .dropna()
+    )
 
-    print(f"{symbol}: p-value = {pvalue:.4f}")
+    return stock_data
 
-# All non-stationary
+def run_adf_tests(stock_data):
+    """
+    Run an ADF test on every individual price series.
+    """
+    for symbol in stock_data.columns:
+        series = stock_data[symbol]
 
+        stat, pvalue, *_ = ts.adfuller(series)
 
-# ------ Hedge Ratio Testing ------
-stock_data = {}
-for symbol, group in adf_df.groupby("symbol"):
-    stock_data[symbol] = group
+        logger.info(
+            "%s | ADF Statistic: %.4f | p-value: %.4f",
+            symbol,
+            stat,
+            pvalue,
+        )
 
-exxon_df = stock_data["XOM"].reset_index(drop=True)
-chevron_df = stock_data["CVX"].reset_index(drop=True)
+def run_cointegration_tests(stock_data):
+    """
+    Test every unique ticker pair for cointegration.
+    """
 
-X = exxon_df["close"]
-Y = chevron_df["close"]
+    pair_results = []
 
-X_with_constant = sm.add_constant(X)
+    for X_name, Y_name in combinations(stock_data.columns, 2):
 
+        X = stock_data[X_name]
+        Y = stock_data[Y_name]
 
-model = sm.OLS(Y, X_with_constant)
-results = model.fit()
-hedge_ratio = results.params["close"]
-resids = results.resid
+        X_const = sm.add_constant(X)
 
-print(results.summary())
-print(hedge_ratio)
+        model = sm.OLS(Y, X_const)
+        results = model.fit()
 
+        hedge_ratio = results.params[X_name]
 
-    
+        coint_t, pvalue, crit_values = ts.coint(X, Y)
+
+        pair_results.append(
+            {
+                "symbol_1": X_name,
+                "symbol_2": Y_name,
+                "hedge_ratio": hedge_ratio,
+                "t_stat": coint_t,
+                "pvalue": pvalue,
+                "critical_1%": crit_values[0],
+                "critical_5%": crit_values[1],
+                "critical_10%": crit_values[2],
+            }
+        )
+
+    results_df = (
+        pd.DataFrame(pair_results)
+        .sort_values("pvalue")
+        .reset_index(drop=True)
+    )
+
+    return results_df
+
+def main():
+    setup_logging()
+
+    stock_data = load_data()
+
+    logger.info("Running ADF tests.")
+    run_adf_tests(stock_data)
+
+    logger.info("Running pairwise cointegration tests.")
+    results_df = run_cointegration_tests(stock_data)
+
+    logger.info("Top candidate pairs:")
+    logger.info("\n%s", results_df.head(10))
+
+    return results_df
+
+if __name__ == "__main__":
+    main()
