@@ -1,5 +1,5 @@
 from logging_config import setup_logging
-from pathlib import Path
+
 
 def main():
     print("Hello from kairos!")

@@ -1,6 +1,5 @@
 import os
 import logging
-from logging_config import setup_logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +8,8 @@ from dotenv import load_dotenv
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+
+from logging_config import setup_logging
 
 load_dotenv()
 
@@ -90,7 +91,9 @@ def main():
     client = create_client()
     request = build_request()
 
-    logger.info("Downloading daily bars for %d symbols.", len(request.symbol_or_symbols))
+    logger.info(
+        "Downloading daily bars for %d symbols.", len(request.symbol_or_symbols)
+    )
 
     bars_df = client.get_stock_bars(request).df
     bars_df.to_parquet(DATA_DIR / "bars.parquet", index=True)
