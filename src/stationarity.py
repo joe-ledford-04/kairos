@@ -3,8 +3,10 @@ import logging
 from itertools import combinations
 
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 import statsmodels.tsa.stattools as ts
+import matplotlib.pyplot as plt
 
 from logging_config import setup_logging
 
@@ -12,7 +14,10 @@ from logging_config import setup_logging
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "Data"
+DATA_DIR = PROJECT_ROOT / "data"
+FIG_DIR = PROJECT_ROOT / "figures"
+
+FIG_DIR.mkdir(exist_ok=True)
 
 
 def load_data():
@@ -226,8 +231,11 @@ def calc_zscore_signal(stock_data, valid_pairs):
         Y_name = row["symbol_2"]
         beta = row["hedge_ratio"]
 
-        X = stock_data[X_name]
-        Y = stock_data[Y_name]
+        pair_prices = stock_data[[X_name, Y_name]].dropna()
+
+        X = pair_prices[X_name]
+
+        Y = pair_prices[Y_name]
 
         spread = compute_spread(X, Y, beta)
 
@@ -276,7 +284,8 @@ def backtest(pair_objects):
 
         trade_count = 0
         current_pos = 0
-        pnl_series = []
+        pnl_values = []
+        timestamps = []
 
         X = pair_data[x_name]
         Y = pair_data[y_name]
@@ -306,16 +315,193 @@ def backtest(pair_objects):
                     current_pos = 0
 
             pnl = current_pos * spread_ret
-            pnl_series.append(pnl)
+            pnl_values.append(pnl)
+            timestamps.append(zscores.index[i])
+
+        pnl_series = pd.Series(data=pnl_values, index=timestamps)
 
         pnl_results[pair_name] = {
             "sim_days": len(zscores),
-            "trading_days": trade_count,
+            "trade_count": trade_count,
             "total_pnl": sum(pnl_series),
             "pnl_series": pnl_series,
         }
 
     return pnl_results
+
+
+def calc_cumulative_pnl(pnl_results):
+    """
+    Calculate cumulative P&L for each trading pair.
+
+    Parameters
+    ----------
+    pnl_results : dict[str, dict]
+        Backtest results containing daily P&L series for each pair.
+
+    Returns
+    -------
+    dict[str, dict]
+        Updated backtest results with cumulative P&L series and final
+        cumulative P&L added.
+    """
+    for pair_name, data in pnl_results.items():
+        pnl_series = pd.Series(data["pnl_series"])
+        cum_pnl_series = pnl_series.cumsum()
+        final_cum_pnl = cum_pnl_series.iloc[-1]
+
+        data["cum_pnl_series"] = cum_pnl_series
+        data["final_cum_pnl"] = final_cum_pnl
+
+    return pnl_results
+
+
+def calc_sharpe_ratio(pnl_results):
+    """
+    Calculate annualized Sharpe ratio for each trading pair.
+
+    The Sharpe ratio is calculated as:
+        mean(daily P&L) / std(daily P&L) * sqrt(252)
+
+    Pairs with insufficient trading activity or zero volatility are
+    assigned NaN Sharpe ratios.
+
+    Parameters
+    ----------
+    pnl_results : dict[str, dict]
+        Backtest results containing trade count and daily P&L series.
+
+    Returns
+    -------
+    dict[str, dict]
+        Updated backtest results with Sharpe ratio added.
+    """
+
+    for pair_name, data in pnl_results.items():
+        trade_count = data["trade_count"]
+        pnl_series = pd.Series(data["pnl_series"])
+
+        if trade_count < 5:
+            data["sharpe_ratio"] = np.nan
+            continue
+
+        series_mean = pnl_series.mean()
+        series_std = pnl_series.std()
+
+        if series_std == 0:
+            data["sharpe_ratio"] = np.nan
+            continue
+
+        data["sharpe_ratio"] = (series_mean / series_std) * np.sqrt(252)
+
+    return pnl_results
+
+
+def calc_max_drawdown(pnl_results):
+    """
+    Calculate maximum drawdown for each trading pair.
+
+    Maximum drawdown measures the largest decline from a historical
+    cumulative P&L peak.
+
+    Parameters
+    ----------
+    pnl_results : dict[str, dict]
+        Backtest results containing cumulative P&L series.
+
+    Returns
+    -------
+    dict[str, dict]
+        Updated backtest results with maximum drawdown added.
+    """
+    for pair_name, data in pnl_results.items():
+        cum_pnl_series = pd.Series(data["cum_pnl_series"])
+
+        running_peak = cum_pnl_series.iloc[0]
+        max_drawdown = 0
+
+        for pnl in cum_pnl_series:
+            if pnl > running_peak:
+                running_peak = pnl
+
+            drawdown = running_peak - pnl
+
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+        data["max_drawdown"] = max_drawdown
+
+    return pnl_results
+
+
+def log_backtest_results(pnl_results):
+    """
+    Log summary performance metrics for each trading pair.
+
+    Parameters
+    ----------
+    pnl_results : dict[str, dict]
+        Completed backtest results containing performance metrics.
+    """
+    for pair_name, result in pnl_results.items():
+        logger.info(
+            (
+                "%s | Sim Days: %d | Trades: %d | "
+                "Total PnL: %.2f |Final Cum Pnl: %.2f |Sharpe: %.2f | Max Drawdown: %.2f"
+            ),
+            pair_name,
+            result["sim_days"],
+            result["trade_count"],
+            result["total_pnl"],
+            result["final_cum_pnl"],
+            result["sharpe_ratio"],
+            result["max_drawdown"],
+        )
+
+
+def plot_equity_curves(pnl_results):
+    """
+    Plot cumulative equity curves for each approved trading pair.
+
+    Parameters
+    ----------
+    pnl_results : dict[str, dict]
+        Backtest results containing cumulative P&L series,
+        Sharpe ratio, and maximum drawdown.
+
+    Returns
+    -------
+    None
+        Saves the figure to the figures directory.
+    """
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for pair_name, data in pnl_results.items():
+        cum_series = data["cum_pnl_series"]
+        sharpe = data["sharpe_ratio"]
+        max_draw = data["max_drawdown"]
+
+        ax.plot(
+            cum_series.index,
+            cum_series.values,
+            label=(f"{pair_name} | Sharpe: {sharpe:.2f} | MDD: {max_draw:.2f}"),
+        )
+
+    ax.axhline(
+        y=0,
+        color="black",
+        linestyle="--",
+        linewidth=1,
+    )
+
+    ax.set_title("Equity Curves")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative P&L")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "equity_curves.png")
+    plt.close(fig)
 
 
 def main():
@@ -340,14 +526,14 @@ def main():
 
     logger.info("Backtesting")
     pnl_results = backtest(pair_objects)
-    for pair_name, result in pnl_results.items():
-        logger.info(
-            "%s | Sim Days: %d | Trades: %d | Total PnL: %.2f",
-            pair_name,
-            result["sim_days"],
-            result["trading_days"],
-            result["total_pnl"],
-        )
+    pnl_results = calc_cumulative_pnl(pnl_results)
+    pnl_results = calc_sharpe_ratio(pnl_results)
+    pnl_results = calc_max_drawdown(pnl_results)
+
+    log_backtest_results(pnl_results)
+
+    logger.info("Plotting Equity Curves")
+    plot_equity_curves(pnl_results)
 
 
 if __name__ == "__main__":
