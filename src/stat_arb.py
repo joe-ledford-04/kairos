@@ -4,8 +4,8 @@ from itertools import combinations
 
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
 import statsmodels.tsa.stattools as ts
+import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
 from logging_config import setup_logging
@@ -18,6 +18,14 @@ DATA_DIR = PROJECT_ROOT / "data"
 FIG_DIR = PROJECT_ROOT / "figures"
 
 FIG_DIR.mkdir(exist_ok=True)
+
+P_VALUE_THRESHOLD = 0.05
+ROLLING_Z_WINDOW = 60
+ENTRY_Z = 2.0
+EXIT_Z = 0.5
+MIN_TRADES_FOR_SHARPE = 5
+TRADING_DAYS_PER_YEAR = 252
+TRADE_WINDOW = 63
 
 
 def load_data():
@@ -46,22 +54,21 @@ def load_data():
 
 def run_adf_tests(stock_data):
     """
-        Run Augmented Dickey-Fuller tests on each individual price series.
+    Run Augmented Dickey-Fuller tests on each individual price series.
 
-        Each column in the input DataFrame is treated as a separate time series.
-    `   NaN values are dropped before testing.
+    Each column in the input DataFrame is treated as a separate time series.
+    NaN values are dropped before testing.
 
-        Parameters
-        ----------
-        stock_data : pd.DataFrame
-            Wide-format price data indexed by timestamp.
+    Parameters
+    ----------
+    stock_data : pd.DataFrame
+        Wide-format price data indexed by timestamp.
 
-        Returns
-        -------
-        None
-            Results are logged (ADF statistic and p-value for each symbol).
+    Returns
+    -------
+    None
+        Results are logged (ADF statistic and p-value for each symbol).
     """
-
     for symbol in stock_data.columns:
         series = stock_data[symbol].dropna()
 
@@ -98,14 +105,18 @@ def run_cointegration_tests(stock_data):
     for X_name, Y_name in combinations(stock_data.columns, 2):
         pair_prices = stock_data[[X_name, Y_name]].dropna()
 
+        if len(pair_prices) < TRADING_DAYS_PER_YEAR:
+            continue
+
         X = pair_prices[X_name]
         Y = pair_prices[Y_name]
 
-        X_const = sm.add_constant(X)
+        X_const = sm.add_constant(X, has_constant="add")
 
         model = sm.OLS(Y, X_const)
         results = model.fit()
 
+        intercept = results.params["const"]
         hedge_ratio = results.params[X_name]
 
         coint_t, pvalue, crit_values = ts.coint(Y, X)
@@ -114,6 +125,7 @@ def run_cointegration_tests(stock_data):
             {
                 "symbol_1": X_name,
                 "symbol_2": Y_name,
+                "intercept": intercept,
                 "hedge_ratio": hedge_ratio,
                 "t_stat": coint_t,
                 "pvalue": pvalue,
@@ -123,9 +135,23 @@ def run_cointegration_tests(stock_data):
             }
         )
 
-    results_df = pd.DataFrame(pair_results).sort_values("pvalue").reset_index(drop=True)
+    if not pair_results:
+        return pd.DataFrame(
+            columns=[
+                "symbol_1",
+                "symbol_2",
+                "intercept",
+                "hedge_ratio",
+                "t_stat",
+                "pvalue",
+                "critical_1%",
+                "critical_5%",
+                "critical_10%",
+            ]
+        )
 
-    results_df.to_csv(DATA_DIR / "pairs_testing.csv")
+    results_df = pd.DataFrame(pair_results)
+    results_df = results_df.sort_values("pvalue").reset_index(drop=True)
 
     return results_df
 
@@ -147,7 +173,7 @@ def filter_pairs(results_df):
         Filtered DataFrame containing trading pairs whom exceed p-value threshold.
     """
 
-    valid_pairs = results_df[results_df["pvalue"] <= 0.05]
+    valid_pairs = results_df[results_df["pvalue"] <= P_VALUE_THRESHOLD]
     valid_pairs = valid_pairs.copy()
 
     return valid_pairs
@@ -170,7 +196,7 @@ def filter_by_economic_link(valid_pairs):
     approved_pairs = {
         # Integrated energy majors
         tuple(sorted(("BP", "SHEL"))),
-        tuple(sorted(("TTE", "XOM"))),
+        # TTE:XOM dropped due to weak sharpe and high drawdown
         # Consumer staples: manufacturer <-> retailer
         tuple(sorted(("KHC", "WMT"))),
         tuple(sorted(("GIS", "WMT"))),
@@ -187,17 +213,12 @@ def filter_by_economic_link(valid_pairs):
     return valid_pairs.drop(columns="pair").reset_index(drop=True)
 
 
-def compute_spread(X, Y, beta):
+def compute_spread(X, Y, beta, intercept=0.0):
     """
-    Compute the hedge-adjusted spread between two price series.
-
-    Returns
-    -------
-     pandas.Series
-        Spread defined as:
-            spread = Y - beta * X
+    Compute the hedge-adjusted spread.
+    spread_t = Y_t - (intercept + beta * X_t)
     """
-    return Y - beta * X
+    return Y - (intercept + beta * X)
 
 
 def calc_zscore_signal(stock_data, valid_pairs):
@@ -230,22 +251,27 @@ def calc_zscore_signal(stock_data, valid_pairs):
         X_name = row["symbol_1"]
         Y_name = row["symbol_2"]
         beta = row["hedge_ratio"]
+        intercept = row.get("intercept", 0.0)
 
         pair_prices = stock_data[[X_name, Y_name]].dropna()
 
-        X = pair_prices[X_name]
+        if len(pair_prices) < ROLLING_Z_WINDOW + 2:
+            continue
 
+        X = pair_prices[X_name]
         Y = pair_prices[Y_name]
 
-        spread = compute_spread(X, Y, beta)
+        spread = compute_spread(X, Y, beta, intercept)
 
-        rolling_mean = spread.rolling(window=60).mean()
-        rolling_std = spread.rolling(window=60).std()
+        rolling_mean = spread.rolling(window=ROLLING_Z_WINDOW).mean()
+        rolling_std = spread.rolling(window=ROLLING_Z_WINDOW).std()
 
         zscore = (spread - rolling_mean) / rolling_std
+
         pair_objects[f"{X_name}:{Y_name}"] = {
             X_name: X,
             Y_name: Y,
+            "intercept": intercept,
             "hedge_ratio": beta,
             "spread": spread,
             "zscore": zscore,
@@ -264,6 +290,10 @@ def backtest(pair_objects):
     only the prior day's z-score to avoid look-ahead bias. Daily P&L is
     computed as the beta-adjusted spread return, scaled by the position
     held during that day.
+
+    **NB**: Position decisions use the prior observation's z-score and are applied
+    to the next period's spread change. This simplified backtest does not model
+    transaction costs, slippage, borrow costs, or execution latency.
 
     Parameters
     ----------
@@ -301,17 +331,17 @@ def backtest(pair_objects):
             spread_ret = Y_ret - beta * X_ret
 
             if current_pos == 0:
-                if z_prev > 2:
+                if z_prev > ENTRY_Z:
                     current_pos = -1
                     trade_count += 1
-                elif z_prev < -2:
+                elif z_prev < -ENTRY_Z:
                     current_pos = 1
                     trade_count += 1
             elif current_pos == -1:
-                if z_prev <= 0.5:
+                if z_prev <= EXIT_Z:
                     current_pos = 0
             elif current_pos == 1:
-                if z_prev >= -0.5:
+                if z_prev >= -EXIT_Z:
                     current_pos = 0
 
             pnl = current_pos * spread_ret
@@ -328,6 +358,141 @@ def backtest(pair_objects):
         }
 
     return pnl_results
+
+
+def run_walk_forward_backtest(
+    stock_data,
+    lookback_window=TRADING_DAYS_PER_YEAR,
+    trade_window=TRADE_WINDOW,
+):
+    """
+    Run a walk-forward out-of-sample backtest.
+
+    For each fold:
+    1. Use the lookback window to select cointegrated pairs and estimate
+       static OLS hedge ratios.
+    2. Trade the next trade window using only those previously estimated
+       parameters.
+    3. Store the out-of-sample P&L segment.
+    4. Roll forward by trade_window days and repeat.
+    """
+
+    fold_results = []
+    combined_pnl = {}
+    combined_trade_counts = {}
+
+    n_rows = len(stock_data)
+    fold = 0
+
+    for train_start in range(
+        0,
+        n_rows - lookback_window - trade_window + 1,
+        trade_window,
+    ):
+        train_end = train_start + lookback_window
+        test_end = train_end + trade_window
+
+        train_data = stock_data.iloc[train_start:train_end]
+        test_data = stock_data.iloc[train_end:test_end]
+
+        fold += 1
+
+        logger.info(
+            "Walk-forward fold %d | Train: %s to %s | Test: %s to %s",
+            fold,
+            train_data.index.min(),
+            train_data.index.max(),
+            test_data.index.min(),
+            test_data.index.max(),
+        )
+
+        results_df = run_cointegration_tests(train_data)
+        valid_pairs = filter_pairs(results_df)
+        approved_pairs = filter_by_economic_link(valid_pairs)
+
+        if approved_pairs.empty:
+            logger.info("Fold %d skipped: no approved pairs.", fold)
+            continue
+
+        logger.info(
+            "Fold %d approved pairs: %s",
+            fold,
+            list(zip(approved_pairs["symbol_1"], approved_pairs["symbol_2"])),
+        )
+
+        buffer_start = max(0, train_end - ROLLING_Z_WINDOW)
+        zscore_input = stock_data.iloc[buffer_start:test_end]
+
+        pair_objects = calc_zscore_signal(zscore_input, approved_pairs)
+
+        for pair_data in pair_objects.values():
+            for key, value in pair_data.items():
+                if isinstance(value, pd.Series):
+                    pair_data[key] = value.loc[value.index.isin(test_data.index)]
+
+        pair_objects = {
+            pair_name: pair_data
+            for pair_name, pair_data in pair_objects.items()
+            if len(pair_data["zscore"].dropna()) >= 2
+        }
+                
+
+        if not pair_objects:
+            logger.info("Fold %d skipped: no usable z-score signals.", fold)
+            continue
+
+        fold_pnl_results = backtest(pair_objects)
+
+        for pair_name, result in fold_pnl_results.items():
+            pnl_series = result["pnl_series"]
+
+            if pair_name not in combined_pnl:
+                combined_pnl[pair_name] = []
+                combined_trade_counts[pair_name] = 0
+
+            combined_pnl[pair_name].append(pnl_series)
+            combined_trade_counts[pair_name] += result["trade_count"]
+
+            fold_results.append(
+                {
+                    "fold": fold,
+                    "pair_name": pair_name,
+                    "train_start": train_data.index.min(),
+                    "train_end": train_data.index.max(),
+                    "test_start": test_data.index.min(),
+                    "test_end": test_data.index.max(),
+                    "trade_count": result["trade_count"],
+                    "total_pnl": result["total_pnl"],
+                }
+            )
+
+    combined_results = {}
+
+    for pair_name, pnl_segments in combined_pnl.items():
+        pnl_series = pd.concat(pnl_segments).sort_index()
+
+        combined_results[pair_name] = {
+            "sim_days": len(pnl_series),
+            "trade_count": combined_trade_counts[pair_name],
+            "total_pnl": pnl_series.sum(),
+            "pnl_series": pnl_series,
+        }
+
+    fold_results_df = pd.DataFrame(
+        fold_results,
+        columns=[
+            "fold",
+            "pair_name",
+            "train_start",
+            "train_end",
+            "test_start",
+            "test_end",
+            "trade_count",
+            "total_pnl",
+        ],
+    )
+
+    return combined_results, fold_results_df
 
 
 def calc_cumulative_pnl(pnl_results):
@@ -381,7 +546,7 @@ def calc_sharpe_ratio(pnl_results):
         trade_count = data["trade_count"]
         pnl_series = pd.Series(data["pnl_series"])
 
-        if trade_count < 5:
+        if trade_count < MIN_TRADES_FOR_SHARPE:
             data["sharpe_ratio"] = np.nan
             continue
 
@@ -392,7 +557,9 @@ def calc_sharpe_ratio(pnl_results):
             data["sharpe_ratio"] = np.nan
             continue
 
-        data["sharpe_ratio"] = (series_mean / series_std) * np.sqrt(252)
+        data["sharpe_ratio"] = (series_mean / series_std) * np.sqrt(
+            TRADING_DAYS_PER_YEAR
+        )
 
     return pnl_results
 
@@ -417,19 +584,10 @@ def calc_max_drawdown(pnl_results):
     for pair_name, data in pnl_results.items():
         cum_pnl_series = pd.Series(data["cum_pnl_series"])
 
-        running_peak = cum_pnl_series.iloc[0]
-        max_drawdown = 0
+        running_peak = cum_pnl_series.cummax()
+        drawdowns = running_peak - cum_pnl_series
 
-        for pnl in cum_pnl_series:
-            if pnl > running_peak:
-                running_peak = pnl
-
-            drawdown = running_peak - pnl
-
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-
-        data["max_drawdown"] = max_drawdown
+        data["max_drawdown"] = drawdowns.max()
 
     return pnl_results
 
@@ -447,7 +605,7 @@ def log_backtest_results(pnl_results):
         logger.info(
             (
                 "%s | Sim Days: %d | Trades: %d | "
-                "Total PnL: %.2f |Final Cum Pnl: %.2f |Sharpe: %.2f | Max Drawdown: %.2f"
+                "Total PnL: %.2f | Final Cum PnL: %.2f | Sharpe: %.2f | Max Drawdown: %.2f"
             ),
             pair_name,
             result["sim_days"],
@@ -512,20 +670,18 @@ def main():
     logger.info("Running ADF tests.")
     run_adf_tests(stock_data)
 
-    logger.info("Running pairwise cointegration tests.")
-    results_df = run_cointegration_tests(stock_data)
+    logger.info("Running walk-forward out-of-sample backtest.")
+    pnl_results, fold_results_df = run_walk_forward_backtest(stock_data)
 
-    logger.info("Top approved pairs:")
-    valid_pairs = filter_pairs(results_df)
-    approved_pairs = filter_by_economic_link(valid_pairs)
-    logger.info("\n%s", approved_pairs)
+    if not pnl_results:
+        logger.warning("No out-of-sample P&L results were generated.")
+        return
 
-    logger.info("Calculating Z-score Signal for valid pairs.")
-    pair_objects = calc_zscore_signal(stock_data, approved_pairs)
-    logger.info("\n%s", pair_objects)
+    fold_results_df.to_csv(DATA_DIR / "walk_forward_folds.csv", index=False)
+    logger.info(
+        "Saved walk-forward fold results to %s.", DATA_DIR / "walk_forward_folds.csv"
+    )
 
-    logger.info("Backtesting")
-    pnl_results = backtest(pair_objects)
     pnl_results = calc_cumulative_pnl(pnl_results)
     pnl_results = calc_sharpe_ratio(pnl_results)
     pnl_results = calc_max_drawdown(pnl_results)

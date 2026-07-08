@@ -12,7 +12,7 @@ def setup_logging():
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(LOG_DIR / "stat_arb.log"),
+            logging.FileHandler(LOG_DIR / "stat_arb.log", encoding="utf-8"),
         ],
         force=True,
     )
