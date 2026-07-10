@@ -266,7 +266,7 @@ def calc_zscore_signal(stock_data, valid_pairs):
         rolling_mean = spread.rolling(window=ROLLING_Z_WINDOW).mean()
         rolling_std = spread.rolling(window=ROLLING_Z_WINDOW).std()
 
-        zscore = (spread - rolling_mean) / rolling_std
+        zscore = (spread - rolling_mean) / rolling_std.replace(0, np.nan)
 
         pair_objects[f"{X_name}:{Y_name}"] = {
             X_name: X,
@@ -435,7 +435,6 @@ def run_walk_forward_backtest(
             for pair_name, pair_data in pair_objects.items()
             if len(pair_data["zscore"].dropna()) >= 2
         }
-                
 
         if not pair_objects:
             logger.info("Fold %d skipped: no usable z-score signals.", fold)
