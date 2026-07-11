@@ -21,7 +21,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 end_date = datetime.now()
-start_date = end_date - timedelta(days=2 * 365)
+start_date = end_date - timedelta(days=5 * 365)
 
 
 def create_client():
@@ -34,11 +34,7 @@ def create_client():
     return StockHistoricalDataClient(api_key, secret_key)
 
 
-def build_request():
-
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=2 * 365)
-
+def build_request(start_date, end_date):
     return StockBarsRequest(
         symbol_or_symbols=[
             # Energy Stocks
@@ -59,7 +55,9 @@ def build_request():
             # Great for testing crack spreads (diff between crude oil prices and the refined products)
             "VLO",  # Valero Energy
             "MPC",  # Marathon Petroleum
-            # Food/Beverage Stocks
+            "COP",  # (ConocoPhillips) Third US integrated major
+            "OXY",  # (Occidental Petroleum) anothr US shale/E&P peer to DVN/FANG
+            # Retail Stocks
             # Classic Pair. Historically co-integrated pricing relationships
             "KO",  # Coca-Cola
             "PEP",  # PepsiCo
@@ -79,6 +77,8 @@ def build_request():
             # Pairs-tested to track wholesale vs. retail margin divergences
             "WMT",  # Walmart
             "COST",  # Costco
+            "TGT",  # Target
+            "PG",  # Procter & Gamble
         ],
         timeframe=TimeFrame.Day,
         start=start_date,
@@ -89,7 +89,7 @@ def build_request():
 def main():
     setup_logging()
     client = create_client()
-    request = build_request()
+    request = build_request(start_date, end_date)
 
     logger.info(
         "Downloading daily bars for %d symbols.", len(request.symbol_or_symbols)
