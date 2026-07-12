@@ -23,6 +23,7 @@ P_VALUE_THRESHOLD = 0.05
 ROLLING_Z_WINDOW = 60
 ENTRY_Z = 2.0
 EXIT_Z = 0.5
+ADF_ALPHA = 0.5
 MIN_TRADES_FOR_SHARPE = 5
 TRADING_DAYS_PER_YEAR = 252
 TRADE_WINDOW = 63
@@ -69,17 +70,41 @@ def run_adf_tests(stock_data):
     None
         Results are logged (ADF statistic and p-value for each symbol).
     """
-    for symbol in stock_data.columns:
+    adf_results = []
+
+    cols = list(stock_data.columns)
+    for i, symbol in enumerate(cols):
         series = stock_data[symbol].dropna()
 
-        stat, pvalue, *_ = ts.adfuller(series)
+        level_stat, level_pvalue, *_ = ts.adfuller(series)
 
-        logger.info(
+        diff_series = series.diff().dropna()
+        diff_stat, diff_pvalue, *_ = ts.adfuller(diff_series)
+
+        is_i1 = (
+            level_pvalue > ADF_ALPHA
+            and diff_pvalue <= ADF_ALPHA
+        )
+
+        logger.debug(
             "%s | ADF Statistic: %.4f | p-value: %.4f",
             symbol,
-            stat,
-            pvalue,
+            level_stat,
+            level_pvalue,
         )
+
+        adf_results.append(
+            {
+                "symbol": symbol,
+                "level_stat": level_stat,
+                "level_pvalue": level_pvalue,
+                "diff_stat": diff_stat,
+                "diff_pvalue": diff_pvalue,
+                "is_i1": is_i1,
+            }
+        )
+
+    return pd.DataFrame(adf_results)
 
 
 def run_cointegration_tests(stock_data):
@@ -430,6 +455,7 @@ def run_walk_forward_backtest(
     """
 
     fold_results = []
+    adf_fold_results = []
     combined_returns = {}
     combined_trade_counts = {}
 
@@ -458,7 +484,32 @@ def run_walk_forward_backtest(
             test_data.index.max(),
         )
 
-        results_df = run_cointegration_tests(train_data)
+        adf_results_df = run_adf_tests(train_data)
+
+        adf_results_df["fold"] = fold
+        adf_results_df["train_start"] = train_data.index.min()
+        adf_results_df["train_end"] = train_data.index.max()
+
+        adf_fold_results.append(adf_results_df)
+
+        eligible_symbols = adf_results_df.loc[
+            adf_results_df["is_i1"],
+            "symbol",
+        ].tolist()
+
+        if len(eligible_symbols) < 2:
+            logger.info(
+                "Fold %d skipped: fewer than two I(1) symbols.",
+                fold,
+            )
+            continue
+
+        eligible_train_data = train_data[eligible_symbols]
+
+        results_df = run_cointegration_tests(
+            eligible_train_data
+            )
+
         valid_pairs = filter_pairs(results_df)
         approved_pairs = filter_by_economic_link(valid_pairs)
 
@@ -549,7 +600,22 @@ def run_walk_forward_backtest(
         ],
     )
 
-    return combined_results, fold_results_df
+    if adf_fold_results:
+        adf_fold_results_df = pd.concat(
+            adf_fold_results,
+            ignore_index=True,
+        )
+    else:
+        adf_fold_results_df = pd.DataFrame()  
+
+    adf_results_path = DATA_DIR / "static_walk_forward_adf_results.csv"
+
+    adf_fold_results_df.to_csv(
+        adf_results_path,
+        index=False,
+    )
+
+    return combined_results, fold_results_df, adf_fold_results_df
 
 
 def calc_cumulative_return(backtest_results):
@@ -616,7 +682,10 @@ def calc_return_max_drawdown(backtest_results):
     Calculate maximum drawdown for cumulative raw P&L results.
     """
     for pair_name, data in backtest_results.items():
-        return_series = pd.Series(data["cumulative_return_series"], dtype=float)
+        return_series = pd.Series(
+            data["return_series"],
+            dtype=float
+        )
 
         equity_curve = (1.0 + return_series).cumprod()
         running_peak = equity_curve.cummax()
@@ -690,15 +759,13 @@ def main():
 
     stock_data = load_data()
 
-    logger.info("Running ADF tests.")
-    run_adf_tests(stock_data)
-
     logger.info("Running walk-forward out-of-sample backtest.")
-    backtest_results, fold_results_df = run_walk_forward_backtest(stock_data)
+    backtest_results, fold_results_df, _ = run_walk_forward_backtest(stock_data)
 
     if not backtest_results:
         logger.warning("No out-of-sample return results were generated.")
         return
+
 
     fold_results_path = DATA_DIR / "static_walk_forward_folds.csv"
 
@@ -726,3 +793,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
