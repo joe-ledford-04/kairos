@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 
 from logging_config import setup_logging
 
-
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +22,7 @@ P_VALUE_THRESHOLD = 0.05
 ROLLING_Z_WINDOW = 60
 ENTRY_Z = 2.0
 EXIT_Z = 0.5
-ADF_ALPHA = 0.5
+ADF_ALPHA = 0.05
 MIN_TRADES_FOR_SHARPE = 5
 TRADING_DAYS_PER_YEAR = 252
 TRADE_WINDOW = 63
@@ -106,6 +105,33 @@ def run_adf_tests(stock_data):
 
     return pd.DataFrame(adf_results)
 
+def get_economic_pairs():
+    """
+    Returns a list of valid-tuple-stock pairs verified to have an economic link. 
+    Returns
+    -------
+        approved_pairs : Dict
+            Dictionary of approved pairs that have an approved economic link.
+    """
+    approved_pairs = {
+        # Integrated energy majors
+        tuple(sorted(("BP", "SHEL"))),
+        tuple(sorted(("XOM", "CVX"))),
+        tuple(sorted(("BP", "EQNR"))),
+        # different business models, but shared-commodity exposure CAUTION
+        tuple(sorted(("CVX", "DVN"))),
+        tuple(sorted(("DVN", "XOM"))),
+        tuple(sorted(("CVX", "EQNR"))),
+        # Consumer staples: manufacturer <-> retailer
+        tuple(sorted(("KHC", "WMT"))),
+        tuple(sorted(("GIS", "WMT"))),
+        tuple(sorted(("BG", "HSY"))),
+        tuple(sorted(("PG", "WMT"))),
+        tuple(sorted(("GIS", "PG"))),
+    }
+
+    return approved_pairs
+
 
 def run_cointegration_tests(stock_data):
     """
@@ -127,7 +153,19 @@ def run_cointegration_tests(stock_data):
 
     pair_results = []
 
-    for X_name, Y_name in combinations(stock_data.columns, 2):
+    adf_results = run_adf_tests(stock_data)
+    economic_pairs = get_economic_pairs()
+
+    approved_symbols = {row["symbol"] for _, row in adf_results.iterrows() if row["is_i1"]}
+
+    approved_pairs = [
+        (X_name, Y_name)
+        for X_name, Y_name in economic_pairs
+        if X_name in approved_symbols and Y_name in approved_symbols
+    ]
+
+
+    for X_name, Y_name in approved_pairs:
         pair_prices = stock_data[[X_name, Y_name]].dropna()
 
         if len(pair_prices) < TRADING_DAYS_PER_YEAR:
@@ -202,48 +240,6 @@ def filter_pairs(results_df):
     valid_pairs = valid_pairs.copy()
 
     return valid_pairs
-
-
-def filter_by_economic_link(valid_pairs):
-    """
-    Excludes valid pairs without a plausible economic link.
-
-    Parameters
-    ---------
-        valid_pairs : pd.DataFrame
-            Trading pairs whom exceed p-value threshold.
-
-    Returns
-    -------
-        approved_pairs : pd.DataFrame
-            Filtered DataFrame of valid_pairs that have an approved economic link.
-    """
-    approved_pairs = {
-        # Integrated energy majors
-        tuple(sorted(("BP", "SHEL"))),
-        tuple(sorted(("XOM", "CVX"))),
-        tuple(sorted(("BP", "EQNR"))),
-        # different business models, but shared-commodity exposure CAUTION
-        tuple(sorted(("CVX", "DVN"))),
-        tuple(sorted(("DVN", "XOM"))),
-        tuple(sorted(("CVX", "EQNR"))),
-        # Consumer staples: manufacturer <-> retailer
-        tuple(sorted(("KHC", "WMT"))),
-        tuple(sorted(("GIS", "WMT"))),
-        tuple(sorted(("BG", "HSY"))),
-        tuple(sorted(("PG", "WMT"))),
-        tuple(sorted(("GIS", "PG"))),
-    }
-
-    valid_pairs["pair"] = [
-        tuple(sorted(pair))
-        for pair in zip(valid_pairs["symbol_1"], valid_pairs["symbol_2"])
-    ]
-
-    valid_pairs = valid_pairs[valid_pairs["pair"].isin(approved_pairs)]
-
-    return valid_pairs.drop(columns="pair").reset_index(drop=True)
-
 
 def compute_spread(X, Y, beta, intercept=0.0):
     """
@@ -425,7 +421,7 @@ def backtest(pair_objects):
             dtype=float,
         )
 
-        total_return = (1.0 + return_series).prod() - 1.0
+        total_return = np.prod(1.0 + return_series.to_numpy(dtype=float)) - 1.0
 
         backtest_results[pair_name] = {
             "sim_days": len(return_series),
@@ -511,22 +507,18 @@ def run_walk_forward_backtest(
             )
 
         valid_pairs = filter_pairs(results_df)
-        approved_pairs = filter_by_economic_link(valid_pairs)
+        valid_pairs = list(zip(valid_pairs["symbol_1"], valid_pairs["symbol_2"]))
+        approved_pairs = get_economic_pairs()
+        approved_pairs = [pair for pair in valid_pairs if pair in approved_pairs]
 
-        if approved_pairs.empty:
+        if not approved_pairs:
             logger.info("Fold %d skipped: no approved pairs.", fold)
             continue
 
         logger.info(
-            "Fold %d valid pairs: %s",
-            fold,
-            list(zip(valid_pairs["symbol_1"], valid_pairs["symbol_2"])),
-        )
-
-        logger.info(
             "Fold %d approved pairs: %s",
             fold,
-            list(zip(approved_pairs["symbol_1"], approved_pairs["symbol_2"])),
+            approved_pairs,
         )
 
         buffer_start = max(0, train_end - ROLLING_Z_WINDOW)
@@ -793,4 +785,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
