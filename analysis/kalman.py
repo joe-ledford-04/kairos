@@ -16,11 +16,12 @@ from stat_arb import (
     calc_cumulative_return,
     calc_return_max_drawdown,
     calc_return_sharpe_ratio,
-    filter_by_economic_link,
     filter_pairs,
+    get_economic_pairs,
     load_data,
     log_return_backtest_results,
     plot_return_curves,
+    run_adf_tests,
     run_cointegration_tests,
 )
 
@@ -439,7 +440,7 @@ def backtest_dynamic_beta(pair_objects):
             dtype=float,
         )
 
-        total_return = (1.0 + return_series).prod() - 1.0
+        total_return = np.prod(1.0 + return_series.to_numpy(dtype=float)) - 1.0
 
         backtest_results[pair_name] = {
             "sim_days": len(pair_df),
@@ -494,9 +495,36 @@ def run_kalman_walk_forward_backtest(
             test_data.index.max(),
         )
 
-        results_df = run_cointegration_tests(train_data)
-        valid_pairs = filter_pairs(results_df)
-        approved_pairs = filter_by_economic_link(valid_pairs)
+        adf_results_df = run_adf_tests(train_data)
+
+        eligible_symbols = set(
+            adf_results_df.loc[
+                adf_results_df["is_i1"],
+                "symbol",
+            ]
+        )
+
+        economic_pairs = get_economic_pairs()
+
+        candidate_pairs = [
+            pair
+            for pair in economic_pairs
+            if pair[0] in eligible_symbols and pair[1] in eligible_symbols
+        ]
+
+        if not candidate_pairs:
+            logger.info(
+                "Fold %d skipped: no economic pairs passed the I(1) checks.",
+                fold,
+            )
+            continue
+
+        results_df = run_cointegration_tests(
+            train_data,
+            candidate_pairs,
+        )
+
+        approved_pairs = filter_pairs(results_df)
 
         if approved_pairs.empty:
             logger.info("Fold %d skipped: no approved pairs.", fold)
@@ -505,7 +533,7 @@ def run_kalman_walk_forward_backtest(
         logger.info(
             "Fold %d valid pairs: %s",
             fold,
-            list(zip(valid_pairs["symbol_1"], valid_pairs["symbol_2"])),
+            list(zip(approved_pairs["symbol_1"], approved_pairs["symbol_2"])),
         )
 
         logger.info(

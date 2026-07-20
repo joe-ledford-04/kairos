@@ -1,22 +1,17 @@
 import time
+import logging
 
-from fastapi import FastAPI, Header, Query, Path, Depends, HTTPException, status
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 
 from service.exceptions import PairNotFoundError, ResultsFileNotFoundError
-from .services.chat_service import generate_chat_answer
-from .services.pairs_service import get_pair_result as lookup_pair_result
-import logging
+from service.services.chat_service import generate_chat_answer
+from service.routers import chat, pairs
+
 from analysis.logging_config import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-EXPECTED_API_KEY = "kairos-secret"
-
-api_key_header = APIKeyHeader(name="X-API-key")
 
 app = FastAPI()
 
@@ -47,40 +42,11 @@ def results_file_not_found_handler(request, exc: ResultsFileNotFoundError):
         content={"error": str(exc)},
     )
 
-class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=500)
-    top_k: int = Field(default=5, ge=1, le=20)
-    static: bool = Field(default=True)
+app.include_router(chat.router)
 
-class ChatResponse(BaseModel):
-    answer: str
-
-def get_current_user(api_key: str = Depends(api_key_header)) -> str:
-    if api_key != EXPECTED_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key"
-        )
-    return "kairos-user"
+app.include_router(pairs.router)
 
 @app.get("/")
 def read_root():
     return {"status": "ok"}
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(
-    request: ChatRequest,
-    current_user: str = Depends(get_current_user),
-) -> ChatResponse:
-    answer = await generate_chat_answer(current_user, request.message, request.static)
-    return ChatResponse(answer=answer)
-
-@app.get("/api/pairs/{pair_name}")
-def get_pair_results(
-    pair_name: str = Path(min_length=3, max_length=20),
-    fold: int | None = Query(default=None, ge=1, le=15),
-    static: bool = Query(default=True),
-    x_api_key: str | None = Header(default=None, min_length=2),
-):
-    result = lookup_pair_result(pair_name, fold, static)
-    return {**result, "x_api_key": x_api_key}

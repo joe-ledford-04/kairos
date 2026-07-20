@@ -133,7 +133,7 @@ def get_economic_pairs():
     return approved_pairs
 
 
-def run_cointegration_tests(stock_data):
+def run_cointegration_tests(stock_data, candidate_pairs):
     """
     Test every unique ticker pair for cointegration.
 
@@ -152,20 +152,7 @@ def run_cointegration_tests(stock_data):
     """
 
     pair_results = []
-
-    adf_results = run_adf_tests(stock_data)
-    economic_pairs = get_economic_pairs()
-
-    approved_symbols = {row["symbol"] for _, row in adf_results.iterrows() if row["is_i1"]}
-
-    approved_pairs = [
-        (X_name, Y_name)
-        for X_name, Y_name in economic_pairs
-        if X_name in approved_symbols and Y_name in approved_symbols
-    ]
-
-
-    for X_name, Y_name in approved_pairs:
+    for X_name, Y_name in candidate_pairs:
         pair_prices = stock_data[[X_name, Y_name]].dropna()
 
         if len(pair_prices) < TRADING_DAYS_PER_YEAR:
@@ -198,25 +185,26 @@ def run_cointegration_tests(stock_data):
             }
         )
 
+    columns = [
+        "symbol_1",
+        "symbol_2",
+        "intercept",
+        "hedge_ratio",
+        "t_stat",
+        "pvalue",
+        "critical_1%",
+        "critical_5%",
+        "critical_10%",
+    ]
+
     if not pair_results:
-        return pd.DataFrame(
-            columns=[
-                "symbol_1",
-                "symbol_2",
-                "intercept",
-                "hedge_ratio",
-                "t_stat",
-                "pvalue",
-                "critical_1%",
-                "critical_5%",
-                "critical_10%",
-            ]
-        )
+        return pd.DataFrame(columns=columns)
 
-    results_df = pd.DataFrame(pair_results)
-    results_df = results_df.sort_values("pvalue").reset_index(drop=True)
-
-    return results_df
+    return (
+        pd.DataFrame(pair_results)
+        .sort_values("pvalue")
+        .reset_index(drop=True)
+    )
 
 
 def filter_pairs(results_df):
@@ -500,25 +488,34 @@ def run_walk_forward_backtest(
             )
             continue
 
-        eligible_train_data = train_data[eligible_symbols]
+        economic_piars = get_economic_pairs()
+
+        candidate_pairs = [
+            pair for pair in economic_piars if pair[0]
+            in eligible_symbols and pair[1] in eligible_symbols
+        ]
+
+        if not candidate_pairs:
+            logger.info(
+                "Fold %d skipped: no economic pairs passed the I(1) checks.",
+                fold,
+            )
+            continue
 
         results_df = run_cointegration_tests(
-            eligible_train_data
-            )
+            train_data,
+            candidate_pairs
+        )
 
-        valid_pairs = filter_pairs(results_df)
-        valid_pairs = list(zip(valid_pairs["symbol_1"], valid_pairs["symbol_2"]))
-        approved_pairs = get_economic_pairs()
-        approved_pairs = [pair for pair in valid_pairs if pair in approved_pairs]
-
-        if not approved_pairs:
-            logger.info("Fold %d skipped: no approved pairs.", fold)
-            continue
+        approved_pairs = filter_pairs(results_df)
 
         logger.info(
             "Fold %d approved pairs: %s",
             fold,
-            approved_pairs,
+            list(zip(
+                approved_pairs["symbol_1"],
+                approved_pairs["symbol_2"],
+            )),
         )
 
         buffer_start = max(0, train_end - ROLLING_Z_WINDOW)
