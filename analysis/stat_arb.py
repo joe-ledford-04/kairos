@@ -114,19 +114,22 @@ def get_economic_pairs():
             Dictionary of approved pairs that have an approved economic link.
     """
     approved_pairs = {
-        # Integrated energy majors
-        tuple(sorted(("BP", "SHEL"))),
+        # Core Pairs
         tuple(sorted(("XOM", "CVX"))),
-        tuple(sorted(("BP", "EQNR"))),
-        # different business models, but shared-commodity exposure CAUTION
-        tuple(sorted(("CVX", "DVN"))),
-        tuple(sorted(("DVN", "XOM"))),
-        tuple(sorted(("CVX", "EQNR"))),
-        # Consumer staples: manufacturer <-> retailer
-        tuple(sorted(("KHC", "WMT"))),
-        tuple(sorted(("GIS", "WMT"))),
-        tuple(sorted(("BG", "HSY"))),
-        tuple(sorted(("PG", "WMT"))),
+        tuple(sorted(("BP", "SHEL"))),
+        tuple(sorted(("DVN", "FANG"))),
+        tuple(sorted(("VLO", "MPC"))),
+        tuple(sorted(("KO", "PEP"))),
+        tuple(sorted(("KHC", "GIS"))),
+        tuple(sorted(("MDLZ", "HSY"))),
+        tuple(sorted(("WMT", "COST"))),
+        
+        # Secondary Pairs
+        tuple(sorted(("TTE", "EQNR"))),
+        tuple(sorted(("SHEL", "TTE"))),
+        tuple(sorted(("COP", "OXY"))),
+        tuple(sorted(("COP", "DVN"))),
+        tuple(sorted(("WMT", "TGT"))),
         tuple(sorted(("GIS", "PG"))),
     }
 

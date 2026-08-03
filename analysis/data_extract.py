@@ -2,12 +2,14 @@ import os
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.models.bars import BarSet
 
 from logging_config import setup_logging
 
@@ -80,11 +82,10 @@ def build_request(start_date, end_date):
             "TGT",  # Target
             "PG",  # Procter & Gamble
         ],
-        timeframe=TimeFrame.Day,
+        timeframe= cast(TimeFrame, TimeFrame.Day),
         start=start_date,
         end=end_date,
     )
-
 
 def main():
     setup_logging()
@@ -95,7 +96,8 @@ def main():
         "Downloading daily bars for %d symbols.", len(request.symbol_or_symbols)
     )
 
-    bars_df = client.get_stock_bars(request).df
+    bars = cast(BarSet, client.get_stock_bars(request))
+    bars_df = bars.df
     bars_df.to_parquet(DATA_DIR / "bars.parquet", index=True)
 
     logger.info("Saved %d rows to %s.", len(bars_df), DATA_DIR)
