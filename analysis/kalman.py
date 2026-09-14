@@ -39,7 +39,7 @@ FIG_DIR.mkdir(exist_ok=True)
 ADAPT_FULL_TRAIN = False
 
 
-def _clean_pair_prices(X, Y):
+def clean_pair_prices(X, Y):
     """Align two price series and return them as floats with missing rows removed."""
     pair_prices = pd.concat([X, Y], axis=1).dropna()
 
@@ -59,7 +59,7 @@ def init_kalman_state(X_train, Y_train, delta=1e-4, observation_covariance=None)
     The initial intercept and hedge ratio come from an OLS regression fit on
     train data only. This avoids leaking test data into the initial state.
     """
-    X_train, Y_train = _clean_pair_prices(X_train, Y_train)
+    X_train, Y_train = clean_pair_prices(X_train, Y_train)
 
     if len(X_train) < 2:
         raise ValueError(
@@ -108,7 +108,7 @@ def run_kalman_forward(
     Returns posterior beta/intercept series plus the one-step-ahead innovation:
         innovation_t = Y_t - E[Y_t | information through t-1]
     """
-    X_new, Y_new = _clean_pair_prices(X_new, Y_new)
+    X_new, Y_new = clean_pair_prices(X_new, Y_new)
 
     transition_matrix = kf.transition_matrices
     transition_covariance = kf.transition_covariance
